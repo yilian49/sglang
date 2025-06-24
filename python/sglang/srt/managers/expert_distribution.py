@@ -462,6 +462,7 @@ class _SelectExpertsSinglePassGatherer(_LayerBasedGpuSinglePassGatherer):
     def on_select_experts(self, layer_idx: int, topk_ids: torch.Tensor):
         topk_ids = topk_ids.flatten()
         mask = topk_ids != -1
+        print(f"data sliced shape: {self._data[layer_idx, :].shape}, ")
         self._data[layer_idx, :].scatter_add_(
             dim=0, index=topk_ids.masked_fill(~mask, 0).long(), src=mask.int()
         )

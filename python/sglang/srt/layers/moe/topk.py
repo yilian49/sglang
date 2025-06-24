@@ -458,6 +458,22 @@ def select_experts(
             info=expert_location_dispatch_info,
         )
     )
+    # debugging prints
+    print(f"router_logits.shape: {router_logits.shape}")
+    print(f"hidden_states.shape: {hidden_states.shape}")
+    print(f"top_k: {top_k}")
+    print(f"use_grouped_topk: {use_grouped_topk}")
+    print(f"renormalize: {renormalize}")
+    print(f"topk_group: {topk_group}")
+    print(f"num_expert_group: {num_expert_group}")
+    print(f"num_fused_shared_experts: {num_fused_shared_experts}")
+    print(f"custom_routing_function: {custom_routing_function}")
+    print(f"correction_bias shape: {correction_bias.shape if correction_bias is not None else None}")
+    print(f"torch_native: {torch_native}")
+    print(f"routed_scaling_factor: {routed_scaling_factor}")
+    print(f"num_token_non_padded: {num_token_non_padded}")
+    print(f"expert_location_dispatch_info: {expert_location_dispatch_info}")
+
 
     # DeepSeek V2/V3/R1 series models use grouped_top_k
     if use_grouped_topk:
@@ -522,6 +538,9 @@ def select_experts(
             topk=top_k,
             renormalize=renormalize,
         )
+
+    print(f"topk_weights.shape: {topk_weights.shape}")
+    print(f"topk_ids.shape: {topk_ids.shape}")
 
     get_global_expert_distribution_recorder().on_select_experts(topk_ids=topk_ids)
 
