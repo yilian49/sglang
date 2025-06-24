@@ -370,9 +370,12 @@ class DeepseekV2MoE(nn.Module):
         shared_output = self._forward_shared_experts(hidden_states)
 
         with torch.cuda.stream(self.alt_stream):
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
+            with get_global_expert_distribution_recorder().with_current_layer(
+                self.layer_id
+            ):
+                    final_hidden_states = self.experts(
+                        hidden_states=hidden_states, router_logits=router_logits
+                )
             if not _is_cuda:
                 final_hidden_states *= self.routed_scaling_factor
         current_stream.wait_stream(self.alt_stream)
@@ -1842,11 +1845,15 @@ class DeepseekV2ForCausalLM(nn.Module):
                             layer_ids.add(layer_id)
 
         for layer_id in layer_ids:
-            self_attn = (
-                self.model.layers[layer_id].self_attn
-                if not is_nextn
-                else self.model.decoder.self_attn
-            )
+            # self_attn = (
+            #     self.model.layers[layer_id].self_attn
+            #     if not is_nextn
+            #     else self.model.decoder.self_attn
+            # )
+            if is_nextn:
+                self_attn = self.model.decoder.self_attn
+            else:
+                self_attn = self.model.layers[layer_id].self_attn
             if hasattr(self_attn.kv_b_proj, "qweight"):
                 # AWQ compatible
                 if _is_cuda:

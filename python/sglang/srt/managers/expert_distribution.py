@@ -65,6 +65,10 @@ class ExpertDistributionRecorder(ABC):
     def with_forward_pass(self, forward_pass_id: int, forward_batch: ForwardBatch):
         yield
 
+    @contextmanager
+    def with_recording_disabled(self):
+        yield
+
     def on_select_experts(self, topk_ids: torch.Tensor):
         pass
 
@@ -147,6 +151,16 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
                 yield
             finally:
                 self._on_forward_pass_end(forward_pass_id)
+
+    @contextmanager
+    def with_recording_disabled(self):
+        """Context manager to temporarily disable recording."""
+        previous_recording_state = self._recording
+        self._recording = False
+        try:
+            yield
+        finally:
+            self._recording = previous_recording_state
 
     def _on_forward_pass_start(self, forward_batch: ForwardBatch):
         if not self._recording:

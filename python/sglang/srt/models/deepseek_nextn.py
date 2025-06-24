@@ -160,6 +160,9 @@ class DeepseekV3ForCausalLMNextN(DeepseekV3ForCausalLM):
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        from sglang.srt.managers.expert_distribution import (
+            get_global_expert_distribution_recorder,
+        )
         super().load_weights(weights, is_nextn=True)
 
 
