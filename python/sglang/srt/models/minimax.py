@@ -136,6 +136,7 @@ class MiniMaxText01MoE(nn.Module):
             hidden_states: torch.Tensor,
             should_allreduce_rusion: bool = False,
     ) -> torch.Tensor:
+        #TODO: implement deepep here
         num_tokens, hidden_dim = hidden_states.shape
 
         router_logits, _ = self.gate(hidden_states)
@@ -146,3 +147,19 @@ class MiniMaxText01MoE(nn.Module):
         if self.tp_size > 1 and not should_allreduce_rusion:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_dim)
+    
+class MiniMaxText01LinearAttention(nn.Module):
+    def __init__(
+            self,
+            hidden_size: int,
+            num_heads: int,
+            num_hidden_layers: int,
+            block_size: int,
+            head_dim: int,
+            layer_id: int,
+            quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.num_hidden_layers = num_hidden_layers
+        self.head_dim = head_dim if head_dim is not None else hidden_size // num_heads
