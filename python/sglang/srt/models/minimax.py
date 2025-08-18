@@ -131,16 +131,7 @@ class MiniMaxText01MoE(nn.Module):
     #     param.data.copy_(loaded_weight.to(torch.float32))
     #     return
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_size = hidden_states.shape
-        hidden_states = hidden_states.view(-1, self.hidden_size)
-        router_logits_fp32, _ = self.gate(hidden_states.to(torch.float32))
-        final_hidden_states = self.experts(
-            hidden_states, router_logits_fp32.to(hidden_states.dtype))
-        final_hidden = final_hidden_states.view(num_tokens, hidden_size)
-        return final_hidden
-    
-    def forward_normal(
+    def forward(
             self,
             hidden_states: torch.Tensor,
             should_allreduce_rusion: bool = False,
@@ -150,6 +141,8 @@ class MiniMaxText01MoE(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         topk_output = self.top_k(hidden_states, router_logits)
         final_hidden_states = self.experts(hidden_states, topk_output)
-        
-    
+        #TODO: Implement shared experts if necessary here
 
+        if self.tp_size > 1 and not should_allreduce_rusion:
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        return final_hidden_states.view(num_tokens, hidden_dim)
