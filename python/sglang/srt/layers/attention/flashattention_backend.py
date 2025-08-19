@@ -11,11 +11,12 @@ from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.mem_cache.memory_pool import SWAKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
+from sglang.srt.speculative.eagle_utils_v2 import EagleDraftInput, EagleVerifyInput
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
+    from sglang.srt.speculative.spec_info import SpecInfo
 
 from sgl_kernel import merge_state_v2
 from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
@@ -333,7 +334,7 @@ class FlashAttentionBackend(AttentionBackend):
         )
         self.speculative_step_id = speculative_step_id
 
-        # Local attention settings
+        # Local atteflantion settings
         self.attention_chunk_size = (
             model_runner.attention_chunk_size
             if hasattr(model_runner, "attention_chunk_size")
@@ -2032,6 +2033,10 @@ class FlashAttentionBackend(AttentionBackend):
             lam.local_max_query_len = int(seqlens_q_local_np.max())
             lam.local_max_seq_len = int(seqlens_k_local_np.max())
 
+    def update_verify_buffers_to_fill_after_draft(
+        self, spec_info: SpecInfo, cuda_graph_bs: Optional[int]
+    ):
+        pass
 
 class FlashAttentionMultiStepBackend:
 

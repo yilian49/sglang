@@ -68,7 +68,8 @@ class TestEagleLargeBS(CustomTestCase):
     other_args = [
         "--trust-remote-code",
         "--attention-backend",
-        "triton",
+        # "triton",
+        "fa3",
         "--speculative-algorithm",
         "EAGLE",
         "--speculative-draft-model",
@@ -119,6 +120,7 @@ class TestEagleLargeBS(CustomTestCase):
         )  # 0.3333 for 60 questions; 0.234 for 1319 questions
 
 
+
 class TestEagleLargeBSNoSD(TestEagleLargeBS):
     num_questions = 10000
     max_running_requests = 64
@@ -133,6 +135,26 @@ class TestEagleLargeBSNoSD(TestEagleLargeBS):
         "--cuda-graph-bs",
         *[str(i) for i in range(1, max_running_requests + 1)],
         "--disable-overlap-schedule",
+    ]
+
+
+class TestEagleLargeBSOverlapNoSD(TestEagleLargeBS):
+    """
+    Overlap scheduling ENABLED, speculative decoding DISABLED.
+    """
+
+    num_questions = 10000
+    max_running_requests = 64
+    other_args = [
+        "--trust-remote-code",
+        "--attention-backend",
+        "triton",
+        "--mem-fraction-static",
+        "0.75",
+        "--max-running-requests",
+        str(max_running_requests),
+        "--cuda-graph-bs",
+        *[str(i) for i in range(1, max_running_requests + 1)],
     ]
 
 
