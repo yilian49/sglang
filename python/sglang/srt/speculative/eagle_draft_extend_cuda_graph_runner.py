@@ -21,7 +21,7 @@ from sglang.srt.model_executor.graph_runner import (
     set_global_graph_memory_pool,
     set_torch_compile_config,
 )
-from sglang.srt.speculative.eagle_utils import EagleDraftInput, fast_topk
+from sglang.srt.speculative.eagle_utils_v2 import EagleDraftInput, fast_topk
 from sglang.srt.utils import (
     require_attn_tp_gather,
     require_gathered_buffer,
@@ -30,7 +30,7 @@ from sglang.srt.utils import (
 )
 
 if TYPE_CHECKING:
-    from sglang.srt.speculative.eagle_worker import EAGLEWorker
+    from sglang.srt.speculative.eagle_worker_v2 import EAGLEWorker
 
 
 class EAGLEDraftExtendCudaGraphRunner:
