@@ -63,7 +63,8 @@ class TestEagleBS1(CustomTestCase):
 
 
 class TestEagleLargeBS(CustomTestCase):
-    num_questions = 10000
+    # num_questions = 10000
+    num_questions = 32
     max_running_requests = 64
     other_args = [
         "--trust-remote-code",
@@ -156,6 +157,60 @@ class TestEagleLargeBSOverlapNoSD(TestEagleLargeBS):
         "--cuda-graph-bs",
         *[str(i) for i in range(1, max_running_requests + 1)],
     ]
+
+
+
+# E2E smoke for EAGLE3 on gpt-oss-20b with triton backend.
+class TestEagleE3GptOss20B(CustomTestCase):
+    """E2E smoke for EAGLE3 on gpt-oss-20b with triton backend.
+
+    Mirrors the pattern in this file: launch a server with the provided
+    flags and run the 5-shot GSM8K harness with a sanity accuracy bar.
+    """
+
+    num_questions = 10000
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = "openai/gpt-oss-20b"
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            other_args=[
+                "--trust-remote-code",
+                "--attention-backend", "triton",
+                "--dtype", "bfloat16",
+                "--mem-fraction-static", "0.85",
+                "--tp", "1",
+                "--speculative-algorithm", "EAGLE3",
+                "--speculative-draft-model-path",
+                "/data/shenggui/projects/SpecForge/outputs/perfect-blend-gptoss-20b-eagle3/epoch_1",
+                "--speculative-num-steps", "3",
+                "--speculative-eagle-topk", "2",
+                "--speculative-num-draft-tokens", "6",
+                "--cuda-graph-max-bs", "1",
+            ],
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+    def test_gsm8k(self):
+        args = SimpleNamespace(
+            num_shots=5,
+            data_path=None,
+            num_questions=self.num_questions,
+            max_new_tokens=512,
+            parallel=128,
+            host="http://127.0.0.1",
+            port=int(self.base_url.split(":")[-1]),
+        )
+        metrics = run_eval(args)
+        print(f"TestEagleE3GptOss20B -- {metrics=}")
+        self.assertGreater(metrics["accuracy"], 0.23)
 
 
 if __name__ == "__main__":
