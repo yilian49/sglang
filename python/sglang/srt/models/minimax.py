@@ -20,6 +20,11 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from sglang.srt.layers.dp_attention import (
+    get_attention_tp_rank,
+    get_attention_tp_size,
+    is_dp_attention_enabled,
+)
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
@@ -156,10 +161,60 @@ class MiniMaxText01LinearAttention(nn.Module):
             num_hidden_layers: int,
             block_size: int,
             head_dim: int,
+            hidden_act: str,
             layer_id: int,
             quant_config: Optional[QuantizationConfig] = None,
+            prefix: str = "",
     ) -> None:
+        # TODO: support DP Attention
+        attn_tp_rank = get_attention_tp_rank()
+        attn_tp_size = get_attention_tp_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_hidden_layers = num_hidden_layers
         self.head_dim = head_dim if head_dim is not None else hidden_size // num_heads
+        self.block_size = block_size
+        self.hidden_act = hidden_act
+        self.layer_id = layer_id
+        self.prefix = prefix
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,
+            head_dim,
+            self.num_heads,
+            quant_config=quant_config,
+            tp_rank=attn_tp_rank,
+            tp_size=attn_tp_size,
+            prefix=prefix,
+        )
+        self.output_gate = ColumnParallelLinear(
+            hidden_size,
+        )
+
+        attn_backend = global_server_args_dict.get("attention_backend")
+
+
+
+    @staticmethod
+    def _build_slope_tensor(n_attention_heads: int):
+
+        def get_slopes(n):
+
+            def get_slopes_power_of_2(n):
+                start = 2**(-(2**-(math.log2(n) - 3)))
+                ratio = start
+                return [start * ratio**i for i in range(n)]
+
+            if math.log2(n).is_integer():
+                return get_slopes_power_of_2(n)
+            else:
+                closest_power_of_2 = 2**math.floor(math.log2(n))
+                return (get_slopes_power_of_2(closest_power_of_2) + get_slopes(
+                    2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
+
+        slopes = torch.tensor(get_slopes(n_attention_heads),
+                              dtype=torch.float32).reshape(
+                                  n_attention_heads, 1, 1)
+        return slopes
