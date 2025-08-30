@@ -64,10 +64,14 @@ def eval_mmmu(args):
 
     model = model.eval().cuda()
 
-    processor = AutoProcessor.from_pretrained(
-        args.model_path, torch_dtype="auto", device_map="auto", trust_remote_code=True
-    )
-
+    try:
+        processor = AutoProcessor.from_pretrained(
+            args.model_path, torch_dtype="auto", device_map="auto", trust_remote_code=True
+        )
+    except Exception as e:
+        processor = AutoTokenizer.from_pretrained(
+                args.model_path, torch_dtype="auto", device_map="auto", trust_remote_code=True
+            )
     samples = prepare_samples(eval_args)
     out_samples = dict()
 
@@ -120,7 +124,8 @@ def eval_mmmu(args):
             )
             generation = generation[0][input_len:]
             response = processor.decode(generation, skip_special_tokens=True)
-        except:
+        except Exception as e:
+            print(f"Error occurred during generation: {e}")
             contents = []
             if prefix:
                 contents += [prefix]
