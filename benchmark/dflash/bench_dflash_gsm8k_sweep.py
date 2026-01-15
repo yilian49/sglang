@@ -1,11 +1,19 @@
-"""DFLASH vs baseline GSM8K sweep.
+"""DFLASH GSM8K sweep benchmark.
 
 This is a *benchmark script* (not a CI test): it can take a long time because it
 launches servers for multiple (attention_backend, tp_size) configs and runs a
 GSM8K workload for each (concurrency, num_questions) setting.
 
+Two modes:
+1. Default: Compare baseline vs DFLASH (fused KV enabled by default)
+2. --compare-fused-kv: Compare all three: baseline, DFLASH fused, DFLASH unfused
+
 Example usage:
-  ./venv/bin/python benchmark/gsm8k/bench_dflash_gsm8k_sweep.py --output-md dflash_gsm8k_sweep.md
+  # Compare baseline vs DFLASH
+  python benchmark/dflash/bench_dflash_gsm8k_sweep.py --output-md dflash_gsm8k_sweep.md
+
+  # Compare all three (baseline, DFLASH fused, DFLASH unfused)
+  python benchmark/dflash/bench_dflash_gsm8k_sweep.py --compare-fused-kv --output-md full_sweep.md
 """
 
 from __future__ import annotations
@@ -273,6 +281,11 @@ def main() -> None:
         default="flashinfer,fa3",
         help="Comma-separated list. Will auto-skip fa3 on Blackwell/SM<90.",
     )
+    parser.add_argument(
+        "--compare-fused-kv",
+        action="store_true",
+        help="Compare all three: baseline, DFLASH fused, DFLASH unfused.",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -357,13 +370,13 @@ def main() -> None:
     dflash_accept_len: dict[tuple[str, int, int], Optional[float]] = {}
     baseline_acc: dict[tuple[str, int, int], Optional[float]] = {}
     dflash_acc: dict[tuple[str, int, int], Optional[float]] = {}
+    # Additional results for fused KV comparison mode
+    dflash_unfused_toks: dict[tuple[str, int, int], Optional[float]] = {}
+    dflash_unfused_accept_len: dict[tuple[str, int, int], Optional[float]] = {}
+    dflash_unfused_acc: dict[tuple[str, int, int], Optional[float]] = {}
 
     for backend in attention_backends:
         for tp in tp_sizes:
-            print(f"\n=== backend={backend} tp={tp} (baseline) ===")
-            baseline_port = find_available_port(20000)
-            baseline_url = f"http://127.0.0.1:{baseline_port}"
-
             common_server_args: list[str] = [
                 "--trust-remote-code",
                 "--attention-backend",
@@ -383,107 +396,238 @@ def main() -> None:
             if args.disable_radix_cache:
                 common_server_args.append("--disable-radix-cache")
 
-            baseline_proc = popen_launch_server(
-                args.target_model,
-                baseline_url,
-                timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-                other_args=common_server_args,
-            )
-            try:
-                # Warm up.
-                _send_generate(
+            port_base = 20000
+
+            if args.compare_fused_kv:
+                # ======== MODE: Compare all three (baseline, DFLASH fused, DFLASH unfused) ========
+                
+                # 1. Run baseline (no speculative decoding)
+                print(f"\n=== backend={backend} tp={tp} (baseline) ===")
+                baseline_port = find_available_port(port_base)
+                baseline_url = f"http://127.0.0.1:{baseline_port}"
+                baseline_proc = popen_launch_server(
+                    args.target_model,
                     baseline_url,
-                    "Hello",
-                    max_new_tokens=8,
-                    stop=[],
-                    timeout_s=min(int(args.timeout_s), 300),
+                    timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                    other_args=common_server_args,
                 )
-
-                for conc in concurrencies:
-                    n = num_questions_by_conc[conc]
-                    _flush_cache(baseline_url)
-                    metrics = _run_gsm8k_requests(
-                        baseline_url,
-                        prompts=prompts[:n],
-                        labels=labels[:n],
-                        max_new_tokens=int(args.max_new_tokens),
-                        concurrency=int(conc),
-                        stop=default_stop,
-                        timeout_s=int(args.timeout_s),
-                        expect_dflash=False,
-                    )
-                    baseline_toks[(backend, tp, conc)] = metrics.output_toks_per_s
-                    baseline_acc[(backend, tp, conc)] = metrics.accuracy
-                    print(
-                        f"[baseline] conc={conc:>2} n={n:<4} "
-                        f"toks/s={metrics.output_toks_per_s:,.2f} "
-                        f"latency={metrics.latency_s:.1f}s "
-                        f"acc={metrics.accuracy:.3f} invalid={metrics.invalid_rate:.3f}"
-                    )
-            finally:
-                kill_process_tree(baseline_proc.pid)
                 try:
-                    baseline_proc.wait(timeout=30)
-                except Exception:
-                    pass
+                    _send_generate(baseline_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    for conc in concurrencies:
+                        n = num_questions_by_conc[conc]
+                        _flush_cache(baseline_url)
+                        metrics = _run_gsm8k_requests(
+                            baseline_url,
+                            prompts=prompts[:n],
+                            labels=labels[:n],
+                            max_new_tokens=int(args.max_new_tokens),
+                            concurrency=int(conc),
+                            stop=default_stop,
+                            timeout_s=int(args.timeout_s),
+                            expect_dflash=False,
+                        )
+                        baseline_toks[(backend, tp, conc)] = metrics.output_toks_per_s
+                        baseline_acc[(backend, tp, conc)] = metrics.accuracy
+                        print(
+                            f"[baseline] conc={conc:>2} n={n:<4} "
+                            f"toks/s={metrics.output_toks_per_s:,.2f} "
+                            f"latency={metrics.latency_s:.1f}s "
+                            f"acc={metrics.accuracy:.3f} invalid={metrics.invalid_rate:.3f}"
+                        )
+                finally:
+                    kill_process_tree(baseline_proc.pid)
+                    try:
+                        baseline_proc.wait(timeout=30)
+                    except Exception:
+                        pass
 
-            print(f"\n=== backend={backend} tp={tp} (DFLASH) ===")
-            dflash_port = find_available_port(baseline_port + 1)
-            dflash_url = f"http://127.0.0.1:{dflash_port}"
-            dflash_proc = popen_launch_server(
-                args.target_model,
-                dflash_url,
-                timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-                other_args=[
+                dflash_common = [
                     *common_server_args,
                     "--speculative-algorithm",
                     "DFLASH",
                     "--speculative-draft-model-path",
                     args.draft_model,
-                ],
-            )
-            try:
-                _send_generate(
-                    dflash_url,
-                    "Hello",
-                    max_new_tokens=8,
-                    stop=[],
-                    timeout_s=min(int(args.timeout_s), 300),
+                ]
+
+                # 2. Run DFLASH without fused KV
+                print(f"\n=== backend={backend} tp={tp} (DFLASH unfused) ===")
+                unfused_port = find_available_port(baseline_port + 1)
+                unfused_url = f"http://127.0.0.1:{unfused_port}"
+                unfused_proc = popen_launch_server(
+                    args.target_model,
+                    unfused_url,
+                    timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                    other_args=[*dflash_common, "--disable-speculative-dflash-fused-kv"],
                 )
-                for conc in concurrencies:
-                    n = num_questions_by_conc[conc]
-                    _flush_cache(dflash_url)
-                    metrics = _run_gsm8k_requests(
-                        dflash_url,
-                        prompts=prompts[:n],
-                        labels=labels[:n],
-                        max_new_tokens=int(args.max_new_tokens),
-                        concurrency=int(conc),
-                        stop=default_stop,
-                        timeout_s=int(args.timeout_s),
-                        expect_dflash=True,
-                    )
-                    dflash_toks[(backend, tp, conc)] = metrics.output_toks_per_s
-                    dflash_accept_len[(backend, tp, conc)] = metrics.spec_accept_length
-                    dflash_acc[(backend, tp, conc)] = metrics.accuracy
-                    print(
-                        f"[DFLASH]   conc={conc:>2} n={n:<4} "
-                        f"toks/s={metrics.output_toks_per_s:,.2f} "
-                        f"latency={metrics.latency_s:.1f}s "
-                        f"acc={metrics.accuracy:.3f} invalid={metrics.invalid_rate:.3f} "
-                        f"accept_len={metrics.spec_accept_length:.3f} "
-                        f"spec_verify_ct_sum={metrics.spec_verify_ct_sum}"
-                    )
-            finally:
-                kill_process_tree(dflash_proc.pid)
                 try:
-                    dflash_proc.wait(timeout=30)
-                except Exception:
-                    pass
+                    _send_generate(unfused_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    for conc in concurrencies:
+                        n = num_questions_by_conc[conc]
+                        _flush_cache(unfused_url)
+                        metrics = _run_gsm8k_requests(
+                            unfused_url,
+                            prompts=prompts[:n],
+                            labels=labels[:n],
+                            max_new_tokens=int(args.max_new_tokens),
+                            concurrency=int(conc),
+                            stop=default_stop,
+                            timeout_s=int(args.timeout_s),
+                            expect_dflash=True,
+                        )
+                        dflash_unfused_toks[(backend, tp, conc)] = metrics.output_toks_per_s
+                        dflash_unfused_accept_len[(backend, tp, conc)] = metrics.spec_accept_length
+                        dflash_unfused_acc[(backend, tp, conc)] = metrics.accuracy
+                        print(
+                            f"[unfused]  conc={conc:>2} n={n:<4} "
+                            f"toks/s={metrics.output_toks_per_s:,.2f} "
+                            f"latency={metrics.latency_s:.1f}s "
+                            f"acc={metrics.accuracy:.3f} invalid={metrics.invalid_rate:.3f} "
+                            f"accept_len={metrics.spec_accept_length:.3f}"
+                        )
+                finally:
+                    kill_process_tree(unfused_proc.pid)
+                    try:
+                        unfused_proc.wait(timeout=30)
+                    except Exception:
+                        pass
+
+                # 3. Run DFLASH with fused KV (auto-enabled, default)
+                print(f"\n=== backend={backend} tp={tp} (DFLASH fused) ===")
+                fused_port = find_available_port(unfused_port + 1)
+                fused_url = f"http://127.0.0.1:{fused_port}"
+                fused_proc = popen_launch_server(
+                    args.target_model,
+                    fused_url,
+                    timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                    other_args=dflash_common,  # fused KV auto-enabled
+                )
+                try:
+                    _send_generate(fused_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    for conc in concurrencies:
+                        n = num_questions_by_conc[conc]
+                        _flush_cache(fused_url)
+                        metrics = _run_gsm8k_requests(
+                            fused_url,
+                            prompts=prompts[:n],
+                            labels=labels[:n],
+                            max_new_tokens=int(args.max_new_tokens),
+                            concurrency=int(conc),
+                            stop=default_stop,
+                            timeout_s=int(args.timeout_s),
+                            expect_dflash=True,
+                        )
+                        dflash_toks[(backend, tp, conc)] = metrics.output_toks_per_s
+                        dflash_accept_len[(backend, tp, conc)] = metrics.spec_accept_length
+                        dflash_acc[(backend, tp, conc)] = metrics.accuracy
+                        print(
+                            f"[fused]    conc={conc:>2} n={n:<4} "
+                            f"toks/s={metrics.output_toks_per_s:,.2f} "
+                            f"latency={metrics.latency_s:.1f}s "
+                            f"acc={metrics.accuracy:.3f} invalid={metrics.invalid_rate:.3f} "
+                            f"accept_len={metrics.spec_accept_length:.3f}"
+                        )
+                finally:
+                    kill_process_tree(fused_proc.pid)
+                    try:
+                        fused_proc.wait(timeout=30)
+                    except Exception:
+                        pass
+            else:
+                # ======== MODE: Compare baseline vs DFLASH ========
+                print(f"\n=== backend={backend} tp={tp} (baseline) ===")
+                baseline_port = find_available_port(port_base)
+                baseline_url = f"http://127.0.0.1:{baseline_port}"
+                baseline_proc = popen_launch_server(
+                    args.target_model,
+                    baseline_url,
+                    timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                    other_args=common_server_args,
+                )
+                try:
+                    _send_generate(baseline_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    for conc in concurrencies:
+                        n = num_questions_by_conc[conc]
+                        _flush_cache(baseline_url)
+                        metrics = _run_gsm8k_requests(
+                            baseline_url,
+                            prompts=prompts[:n],
+                            labels=labels[:n],
+                            max_new_tokens=int(args.max_new_tokens),
+                            concurrency=int(conc),
+                            stop=default_stop,
+                            timeout_s=int(args.timeout_s),
+                            expect_dflash=False,
+                        )
+                        baseline_toks[(backend, tp, conc)] = metrics.output_toks_per_s
+                        baseline_acc[(backend, tp, conc)] = metrics.accuracy
+                        print(
+                            f"[baseline] conc={conc:>2} n={n:<4} "
+                            f"toks/s={metrics.output_toks_per_s:,.2f} "
+                            f"latency={metrics.latency_s:.1f}s "
+                            f"acc={metrics.accuracy:.3f} invalid={metrics.invalid_rate:.3f}"
+                        )
+                finally:
+                    kill_process_tree(baseline_proc.pid)
+                    try:
+                        baseline_proc.wait(timeout=30)
+                    except Exception:
+                        pass
+
+                print(f"\n=== backend={backend} tp={tp} (DFLASH) ===")
+                dflash_port = find_available_port(baseline_port + 1)
+                dflash_url = f"http://127.0.0.1:{dflash_port}"
+                dflash_proc = popen_launch_server(
+                    args.target_model,
+                    dflash_url,
+                    timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                    other_args=[
+                        *common_server_args,
+                        "--speculative-algorithm",
+                        "DFLASH",
+                        "--speculative-draft-model-path",
+                        args.draft_model,
+                    ],
+                )
+                try:
+                    _send_generate(dflash_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    for conc in concurrencies:
+                        n = num_questions_by_conc[conc]
+                        _flush_cache(dflash_url)
+                        metrics = _run_gsm8k_requests(
+                            dflash_url,
+                            prompts=prompts[:n],
+                            labels=labels[:n],
+                            max_new_tokens=int(args.max_new_tokens),
+                            concurrency=int(conc),
+                            stop=default_stop,
+                            timeout_s=int(args.timeout_s),
+                            expect_dflash=True,
+                        )
+                        dflash_toks[(backend, tp, conc)] = metrics.output_toks_per_s
+                        dflash_accept_len[(backend, tp, conc)] = metrics.spec_accept_length
+                        dflash_acc[(backend, tp, conc)] = metrics.accuracy
+                        print(
+                            f"[DFLASH]   conc={conc:>2} n={n:<4} "
+                            f"toks/s={metrics.output_toks_per_s:,.2f} "
+                            f"latency={metrics.latency_s:.1f}s "
+                            f"acc={metrics.accuracy:.3f} invalid={metrics.invalid_rate:.3f} "
+                            f"accept_len={metrics.spec_accept_length:.3f} "
+                            f"spec_verify_ct_sum={metrics.spec_verify_ct_sum}"
+                        )
+                finally:
+                    kill_process_tree(dflash_proc.pid)
+                    try:
+                        dflash_proc.wait(timeout=30)
+                    except Exception:
+                        pass
 
     # Render markdown.
     md_lines: list[str] = []
-    md_lines.append("# DFLASH GSM8K Sweep")
+
+    if args.compare_fused_kv:
+        md_lines.append("# DFLASH Full Comparison (Baseline vs Fused vs Unfused)")
+    else:
+        md_lines.append("# DFLASH GSM8K Sweep")
     md_lines.append("")
     md_lines.append("## Settings")
     md_lines.append(f"- target_model: `{args.target_model}`")
@@ -498,107 +642,272 @@ def main() -> None:
     md_lines.append(f"- questions_per_concurrency: `base={args.questions_per_concurrency_base}`")
     md_lines.append(f"- device_sm: `{device_sm}`")
     md_lines.append(f"- is_blackwell: `{is_blackwell}`")
+    if args.compare_fused_kv:
+        md_lines.append(f"- mode: `compare-fused-kv`")
     md_lines.append("")
-    md_lines.append(
-        "Note: DFLASH and baseline greedy outputs may diverge on some prompts due to numerical differences "
-        "(e.g. verify path vs decode path). This sweep focuses on throughput."
-    )
+
+    if args.compare_fused_kv:
+        md_lines.append(
+            "Compares all three configurations: baseline (no spec), DFLASH fused (default), DFLASH unfused."
+        )
+    else:
+        md_lines.append(
+            "Note: DFLASH and baseline greedy outputs may diverge on some prompts due to numerical differences "
+            "(e.g. verify path vs decode path). This sweep focuses on throughput."
+        )
     md_lines.append("")
 
     for backend in attention_backends:
         md_lines.append(f"## Backend: `{backend}`")
         md_lines.append("")
 
-        baseline_values = {
-            (tp, conc): baseline_toks.get((backend, tp, conc), None)
-            for tp in tp_sizes
-            for conc in concurrencies
-        }
-        dflash_values = {
-            (tp, conc): dflash_toks.get((backend, tp, conc), None)
-            for tp in tp_sizes
-            for conc in concurrencies
-        }
-        speedup_values: dict[tuple[int, int], Optional[float]] = {}
-        for tp in tp_sizes:
-            for conc in concurrencies:
-                b = baseline_values.get((tp, conc), None)
-                d = dflash_values.get((tp, conc), None)
-                speedup_values[(tp, conc)] = None if (b is None or d is None or b <= 0) else (d / b)
+        if args.compare_fused_kv:
+            # ======== FULL COMPARISON MODE (all three) ========
+            baseline_values = {
+                (tp, conc): baseline_toks.get((backend, tp, conc), None)
+                for tp in tp_sizes
+                for conc in concurrencies
+            }
+            unfused_values = {
+                (tp, conc): dflash_unfused_toks.get((backend, tp, conc), None)
+                for tp in tp_sizes
+                for conc in concurrencies
+            }
+            fused_values = {
+                (tp, conc): dflash_toks.get((backend, tp, conc), None)
+                for tp in tp_sizes
+                for conc in concurrencies
+            }
 
-        md_lines.append("### Baseline output tok/s")
-        md_lines.append(
-            _format_table(
-                tp_sizes=tp_sizes,
-                concurrencies=concurrencies,
-                values=baseline_values,
-                float_fmt=",.2f",
-            )
-        )
-        md_lines.append("")
-        md_lines.append("### Baseline accuracy")
-        md_lines.append(
-            _format_table(
-                tp_sizes=tp_sizes,
-                concurrencies=concurrencies,
-                values={
-                    (tp, conc): baseline_acc.get((backend, tp, conc), None)
-                    for tp in tp_sizes
-                    for conc in concurrencies
-                },
-                float_fmt=".3f",
-            )
-        )
-        md_lines.append("")
-        md_lines.append("### DFLASH output tok/s")
-        md_lines.append(
-            _format_table(
-                tp_sizes=tp_sizes,
-                concurrencies=concurrencies,
-                values=dflash_values,
-                float_fmt=",.2f",
-            )
-        )
-        md_lines.append("")
-        md_lines.append("### DFLASH accuracy")
-        md_lines.append(
-            _format_table(
-                tp_sizes=tp_sizes,
-                concurrencies=concurrencies,
-                values={
-                    (tp, conc): dflash_acc.get((backend, tp, conc), None)
-                    for tp in tp_sizes
-                    for conc in concurrencies
-                },
-                float_fmt=".3f",
-            )
-        )
-        md_lines.append("")
-        md_lines.append("### Speedup (DFLASH / baseline)")
-        md_lines.append(
-            _format_table(
-                tp_sizes=tp_sizes,
-                concurrencies=concurrencies,
-                values=speedup_values,
-                float_fmt=".3f",
-            )
-        )
-        md_lines.append("")
+            # Speedups
+            speedup_unfused_vs_baseline: dict[tuple[int, int], Optional[float]] = {}
+            speedup_fused_vs_baseline: dict[tuple[int, int], Optional[float]] = {}
+            speedup_fused_vs_unfused: dict[tuple[int, int], Optional[float]] = {}
+            for tp in tp_sizes:
+                for conc in concurrencies:
+                    b = baseline_values.get((tp, conc), None)
+                    u = unfused_values.get((tp, conc), None)
+                    f = fused_values.get((tp, conc), None)
+                    speedup_unfused_vs_baseline[(tp, conc)] = None if (b is None or u is None or b <= 0) else (u / b)
+                    speedup_fused_vs_baseline[(tp, conc)] = None if (b is None or f is None or b <= 0) else (f / b)
+                    speedup_fused_vs_unfused[(tp, conc)] = None if (u is None or f is None or u <= 0) else (f / u)
 
-        md_lines.append("### DFLASH acceptance length (mean per-request spec_accept_length)")
-        md_lines.append(
-            _format_table(
-                tp_sizes=tp_sizes,
-                concurrencies=concurrencies,
-                values={
-                    (tp, conc): dflash_accept_len.get((backend, tp, conc), None)
-                    for tp in tp_sizes
-                    for conc in concurrencies
-                },
-                float_fmt=".3f",
+            # Throughput tables
+            md_lines.append("### Baseline (tok/s)")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=baseline_values,
+                    float_fmt=",.2f",
+                )
             )
-        )
-        md_lines.append("")
+            md_lines.append("")
+            md_lines.append("### DFLASH Unfused (tok/s)")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=unfused_values,
+                    float_fmt=",.2f",
+                )
+            )
+            md_lines.append("")
+            md_lines.append("### DFLASH Fused (tok/s)")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=fused_values,
+                    float_fmt=",.2f",
+                )
+            )
+            md_lines.append("")
+
+            # Accuracy tables
+            md_lines.append("### Baseline Accuracy")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values={
+                        (tp, conc): baseline_acc.get((backend, tp, conc), None)
+                        for tp in tp_sizes
+                        for conc in concurrencies
+                    },
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+            md_lines.append("### DFLASH Unfused Accuracy")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values={
+                        (tp, conc): dflash_unfused_acc.get((backend, tp, conc), None)
+                        for tp in tp_sizes
+                        for conc in concurrencies
+                    },
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+            md_lines.append("### DFLASH Fused Accuracy")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values={
+                        (tp, conc): dflash_acc.get((backend, tp, conc), None)
+                        for tp in tp_sizes
+                        for conc in concurrencies
+                    },
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+
+            # Speedup tables
+            md_lines.append("### Speedup: DFLASH Unfused vs Baseline")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=speedup_unfused_vs_baseline,
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+            md_lines.append("### Speedup: DFLASH Fused vs Baseline")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=speedup_fused_vs_baseline,
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+            md_lines.append("### Speedup: Fused vs Unfused (kernel improvement)")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=speedup_fused_vs_unfused,
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+
+            # Acceptance length
+            md_lines.append("### DFLASH Acceptance Length (Fused)")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values={
+                        (tp, conc): dflash_accept_len.get((backend, tp, conc), None)
+                        for tp in tp_sizes
+                        for conc in concurrencies
+                    },
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+
+        else:
+            # ======== BASELINE VS DFLASH MODE ========
+            baseline_values = {
+                (tp, conc): baseline_toks.get((backend, tp, conc), None)
+                for tp in tp_sizes
+                for conc in concurrencies
+            }
+            dflash_values = {
+                (tp, conc): dflash_toks.get((backend, tp, conc), None)
+                for tp in tp_sizes
+                for conc in concurrencies
+            }
+            speedup_values = {}
+            for tp in tp_sizes:
+                for conc in concurrencies:
+                    b = baseline_values.get((tp, conc), None)
+                    d = dflash_values.get((tp, conc), None)
+                    speedup_values[(tp, conc)] = None if (b is None or d is None or b <= 0) else (d / b)
+
+            md_lines.append("### Baseline output tok/s")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=baseline_values,
+                    float_fmt=",.2f",
+                )
+            )
+            md_lines.append("")
+            md_lines.append("### Baseline accuracy")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values={
+                        (tp, conc): baseline_acc.get((backend, tp, conc), None)
+                        for tp in tp_sizes
+                        for conc in concurrencies
+                    },
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+            md_lines.append("### DFLASH output tok/s")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=dflash_values,
+                    float_fmt=",.2f",
+                )
+            )
+            md_lines.append("")
+            md_lines.append("### DFLASH accuracy")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values={
+                        (tp, conc): dflash_acc.get((backend, tp, conc), None)
+                        for tp in tp_sizes
+                        for conc in concurrencies
+                    },
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+            md_lines.append("### Speedup (DFLASH / baseline)")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values=speedup_values,
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
+
+            md_lines.append("### DFLASH acceptance length (mean per-request spec_accept_length)")
+            md_lines.append(
+                _format_table(
+                    tp_sizes=tp_sizes,
+                    concurrencies=concurrencies,
+                    values={
+                        (tp, conc): dflash_accept_len.get((backend, tp, conc), None)
+                        for tp in tp_sizes
+                        for conc in concurrencies
+                    },
+                    float_fmt=".3f",
+                )
+            )
+            md_lines.append("")
 
     with open(args.output_md, "w", encoding="utf-8") as f:
         f.write("\n".join(md_lines))

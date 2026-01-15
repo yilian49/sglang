@@ -428,6 +428,7 @@ class ServerArgs:
     speculative_eagle_topk: Optional[int] = None
     speculative_num_draft_tokens: Optional[int] = None
     speculative_dflash_block_size: Optional[int] = None
+    speculative_dflash_fused_kv: bool = False  # Auto-set based on algorithm
     speculative_accept_threshold_single: float = 1.0
     speculative_accept_threshold_acc: float = 1.0
     speculative_token_map: Optional[str] = None
@@ -2193,6 +2194,10 @@ class ServerArgs:
                     "Mixed chunked prefill is disabled because of using dflash speculative decoding."
                 )
 
+            self.speculative_dflash_fused_kv = not getattr(
+                self, "disable_speculative_dflash_fused_kv", False
+            )
+
         if self.speculative_algorithm in ("EAGLE", "EAGLE3", "STANDALONE"):
             if self.speculative_algorithm == "STANDALONE" and self.enable_dp_attention:
                 # TODO: support dp attention for standalone speculative decoding
@@ -3679,6 +3684,18 @@ class ServerArgs:
             type=int,
             help="DFLASH only. Block size (verify window length). Alias of --speculative-num-draft-tokens for DFLASH.",
             default=ServerArgs.speculative_dflash_block_size,
+        )
+        parser.add_argument(
+            "--speculative-dflash-fused-kv",
+            action="store_true",
+            help=argparse.SUPPRESS,  # Internal: auto-set based on algorithm
+            default=False,
+        )
+        parser.add_argument(
+            "--disable-speculative-dflash-fused-kv",
+            action="store_true",
+            help="DFLASH only. Disable auto-enabled fused KV materialization kernel.",
+            default=False,
         )
         parser.add_argument(
             "--speculative-accept-threshold-single",
