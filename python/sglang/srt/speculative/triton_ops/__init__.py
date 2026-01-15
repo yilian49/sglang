@@ -13,11 +13,6 @@
 # ==============================================================================
 """Triton kernels for speculative decoding."""
 
-from sglang.srt.speculative.triton_ops.fused_kv_materialize import (
-    fused_kv_materialize,
-)
+from sglang.srt.speculative.triton_ops.fused_kv_materialize import fused_kv_materialize
 
 __all__ = ["fused_kv_materialize"]
-
-
-
