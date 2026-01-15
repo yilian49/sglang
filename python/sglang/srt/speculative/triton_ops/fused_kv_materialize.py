@@ -114,35 +114,27 @@ def _fused_norm_rope_write_kernel(
     tl.store(k_write + offs, k_normed.to(v_raw.dtype), mask=mask_pass)
 
 
-def fused_kv_materialize(
-    ctx_hidden: torch.Tensor,
-    batched_kv_weight: torch.Tensor,
-    batched_k_norm_weight: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    positions: torch.Tensor,
-    cache_locs: torch.Tensor,
-    k_cache_buffers: List[torch.Tensor],
-    v_cache_buffers: List[torch.Tensor],
+def _fused_norm_rope_write(
+    kv: torch.Tensor,  # [total_ctx, kv_size*2]
+    k_norm_weight: torch.Tensor,  # [head_dim]
+    cos_sin_cache: torch.Tensor,  # [max_pos, rotary_dim]
+    positions: torch.Tensor,  # [total_ctx]
+    cache_locs: torch.Tensor,  # [total_ctx]
+    k_cache: torch.Tensor,  # [total_slots, num_kv_heads, head_dim]
+    v_cache: torch.Tensor,  # [total_slots, num_kv_heads, head_dim]
     num_kv_heads: int,
     head_dim: int,
     rotary_dim: int,
     eps: float = 1e-6,
-    is_neox_style: bool = True,
 ) -> None:
-    """Fused KV materialization: batched projection + per-layer Triton kernel."""
-    n_layers = batched_kv_weight.shape[0]
-    total_ctx = ctx_hidden.shape[0]
+    """Fused RMSNorm + RoPE + cache write for a single layer."""
+    total_ctx = kv.shape[0]
     if total_ctx == 0:
         return
-    if not is_neox_style:
-        raise NotImplementedError("Only neox-style RoPE is supported.")
 
     kv_size = num_kv_heads * head_dim
     half_rotary_dim = rotary_dim // 2
     BLOCK_HD = triton.next_power_of_2(head_dim)
-
-    # Batched KV projection via cuBLAS
-    kv_all = torch.einsum("th,lkh->ltk", ctx_hidden, batched_kv_weight)
 
     # Ensure int64 for indexing
     if positions.dtype != torch.int64:
@@ -150,35 +142,37 @@ def fused_kv_materialize(
     if cache_locs.dtype != torch.int64:
         cache_locs = cache_locs.to(torch.int64)
 
-    # Per-layer fused kernel
-    for layer_id in range(n_layers):
-        _fused_norm_rope_write_kernel[(total_ctx, num_kv_heads)](
-            kv_all[layer_id],
-            batched_k_norm_weight[layer_id],
-            cos_sin_cache,
-            positions,
-            cache_locs,
-            k_cache_buffers[layer_id],
-            v_cache_buffers[layer_id],
-            kv_all[layer_id].stride(0),
-            cos_sin_cache.stride(0),
-            k_cache_buffers[layer_id].stride(0),
-            k_cache_buffers[layer_id].stride(1),
-            v_cache_buffers[layer_id].stride(0),
-            v_cache_buffers[layer_id].stride(1),
-            total_ctx,
-            num_kv_heads,
-            head_dim,
-            kv_size,
-            rotary_dim,
-            half_rotary_dim,
-            eps,
-            BLOCK_HD,
-        )
+    _fused_norm_rope_write_kernel[(total_ctx, num_kv_heads)](
+        kv,
+        k_norm_weight,
+        cos_sin_cache,
+        positions,
+        cache_locs,
+        k_cache,
+        v_cache,
+        kv.stride(0),
+        cos_sin_cache.stride(0),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        v_cache.stride(0),
+        v_cache.stride(1),
+        total_ctx,
+        num_kv_heads,
+        head_dim,
+        kv_size,
+        rotary_dim,
+        half_rotary_dim,
+        eps,
+        BLOCK_HD,
+    )
 
 
 class FusedKVMaterializeHelper:
-    """Pre-stacks weights at init for efficient fused KV materialization."""
+    """Fused KV materialization helper using batched projection.
+
+    Uses torch.einsum for batched KV projection across all layers,
+    then a Triton kernel for fused RMSNorm + RoPE + cache write per layer.
+    """
 
     def __init__(
         self,
@@ -192,20 +186,30 @@ class FusedKVMaterializeHelper:
         self.head_dim = head_dim
         self.rotary_emb = rotary_emb
         self.n_layers = len(layers)
+        self.device = device
 
-        # Stack weights across layers
-        kv_weights, k_norm_weights = [], []
+        # Pre-extract and stack weights for batched projection
+        kv_weights = []
+        self.k_norm_weights = []
+        self.eps_values = []
+
         for layer in layers:
             attn = layer.self_attn
+            # Extract KV portion of QKV weight
             qkv_w = attn.qkv_proj.weight
-            kv_weights.append(qkv_w[attn.q_size : attn.q_size + 2 * attn.kv_size])
-            k_norm_weights.append(attn.k_norm.weight)
+            kv_weight = qkv_w[attn.q_size : attn.q_size + 2 * attn.kv_size]
+            kv_weights.append(kv_weight)
+            self.k_norm_weights.append(attn.k_norm.weight)
+            self.eps_values.append(attn.k_norm.variance_epsilon)
 
-        self.batched_kv_weight = torch.stack(kv_weights, dim=0).contiguous()
-        self.batched_k_norm_weight = torch.stack(k_norm_weights, dim=0).contiguous()
+        # Stack for batched einsum: [n_layers, kv_size*2, hidden_size]
+        self.batched_kv_weight = torch.stack(kv_weights)
+
         self.rotary_dim = getattr(rotary_emb, "rotary_dim", head_dim)
         self.is_neox_style = getattr(rotary_emb, "is_neox_style", True)
-        self.eps = layers[0].self_attn.k_norm.variance_epsilon
+
+        if not self.is_neox_style:
+            raise NotImplementedError("Only neox-style RoPE is supported.")
 
     def materialize(
         self,
@@ -215,18 +219,28 @@ class FusedKVMaterializeHelper:
         k_cache_buffers: List[torch.Tensor],
         v_cache_buffers: List[torch.Tensor],
     ) -> None:
-        fused_kv_materialize(
-            ctx_hidden,
-            self.batched_kv_weight,
-            self.batched_k_norm_weight,
-            self.rotary_emb.cos_sin_cache,
-            positions,
-            cache_locs,
-            k_cache_buffers,
-            v_cache_buffers,
-            self.num_kv_heads,
-            self.head_dim,
-            self.rotary_dim,
-            self.eps,
-            self.is_neox_style,
-        )
+        """Materialize KV cache for all layers using batched projection."""
+        total_ctx = ctx_hidden.shape[0]
+        if total_ctx == 0:
+            return
+
+        cos_sin_cache = self.rotary_emb.cos_sin_cache
+
+        # Batched KV projection: [n_layers, total_ctx, kv_size*2]
+        kv_all = torch.einsum("th,loh->lto", ctx_hidden, self.batched_kv_weight)
+
+        # Per-layer fused norm/RoPE/write
+        for layer_id in range(self.n_layers):
+            _fused_norm_rope_write(
+                kv_all[layer_id],
+                self.k_norm_weights[layer_id],
+                cos_sin_cache,
+                positions,
+                cache_locs,
+                k_cache_buffers[layer_id],
+                v_cache_buffers[layer_id],
+                self.num_kv_heads,
+                self.head_dim,
+                self.rotary_dim,
+                self.eps_values[layer_id],
+            )

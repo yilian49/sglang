@@ -429,6 +429,7 @@ class ServerArgs:
     speculative_num_draft_tokens: Optional[int] = None
     speculative_dflash_block_size: Optional[int] = None
     speculative_dflash_fused_kv: bool = False  # Auto-set based on algorithm
+    disable_speculative_dflash_fused_kv: bool = False  # CLI flag to disable fused KV
     speculative_accept_threshold_single: float = 1.0
     speculative_accept_threshold_acc: float = 1.0
     speculative_token_map: Optional[str] = None
