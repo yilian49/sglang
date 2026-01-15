@@ -288,7 +288,9 @@ class CudaGraphRunner:
                 if not self.model_runner.spec_algorithm.is_dflash():
                     raise RuntimeError("This should not happen")
             self.capture_forward_mode = ForwardMode.TARGET_VERIFY
-            self.num_tokens_per_bs = self.model_runner.server_args.speculative_num_draft_tokens
+            self.num_tokens_per_bs = (
+                self.model_runner.server_args.speculative_num_draft_tokens
+            )
         elif self.is_dllm:
             self.capture_forward_mode = ForwardMode.DLLM_EXTEND
             self.num_tokens_per_bs = self.dllm_config.block_size
@@ -356,7 +358,10 @@ class CudaGraphRunner:
             and model_runner.eagle_use_aux_hidden_state
         ):
             self.model_runner.model.set_eagle3_layers_to_capture()
-        if model_runner.spec_algorithm.is_dflash() and model_runner.dflash_use_aux_hidden_state:
+        if (
+            model_runner.spec_algorithm.is_dflash()
+            and model_runner.dflash_use_aux_hidden_state
+        ):
             if not hasattr(self.model_runner.model, "set_dflash_layers_to_capture"):
                 raise ValueError(
                     f"Model {self.model_runner.model.__class__.__name__} does not implement set_dflash_layers_to_capture, "
@@ -827,7 +832,9 @@ class CudaGraphRunner:
         ):
             buffers.input_embeds[:raw_num_token].copy_(forward_batch.input_embeds)
             if bs != raw_bs:
-                buffers.input_embeds[raw_num_token : bs * self.num_tokens_per_bs].zero_()
+                buffers.input_embeds[
+                    raw_num_token : bs * self.num_tokens_per_bs
+                ].zero_()
         if self.enable_two_batch_overlap:
             self.tbo_plugin.replay_prepare(
                 forward_mode=self.capture_forward_mode,
@@ -956,9 +963,11 @@ class CudaGraphRunner:
                 draft_token=None,
                 positions=None,
                 draft_token_num=self.model_runner.server_args.speculative_num_draft_tokens,
-                custom_mask=None
-                if (self.model_runner.is_draft_worker or skip_custom_mask)
-                else self.buffers.custom_mask,
+                custom_mask=(
+                    None
+                    if (self.model_runner.is_draft_worker or skip_custom_mask)
+                    else self.buffers.custom_mask
+                ),
                 capture_hidden_mode=(
                     CaptureHiddenMode.NULL
                     if self.model_runner.is_draft_worker

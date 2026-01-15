@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 import torch
+
 from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import ScheduleBatch
@@ -13,9 +14,9 @@ from sglang.srt.mem_cache.common import (
     get_last_loc,
 )
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
+from sglang.srt.speculative.dflash_utils import compute_dflash_accept_len_and_bonus
 from sglang.srt.speculative.spec_info import SpecInput, SpecInputType
 from sglang.srt.speculative.spec_utils import assign_req_to_token_pool_func
-from sglang.srt.speculative.dflash_utils import compute_dflash_accept_len_and_bonus
 
 
 @dataclass
@@ -80,7 +81,9 @@ class DFlashDraftInput(SpecInput):
                 continue
             segments.append(old_target_hidden[old_offsets[idx] : old_offsets[idx + 1]])
 
-        self.target_hidden = torch.cat(segments, dim=0) if segments else old_target_hidden[:0]
+        self.target_hidden = (
+            torch.cat(segments, dim=0) if segments else old_target_hidden[:0]
+        )
 
     def merge_batch(self, spec_info: "DFlashDraftInput"):
         self.verified_id = torch.cat([self.verified_id, spec_info.verified_id], dim=0)
@@ -88,8 +91,12 @@ class DFlashDraftInput(SpecInput):
         self.draft_seq_lens_cpu.extend(spec_info.draft_seq_lens_cpu)
         if self.target_hidden is None or self.target_hidden.numel() == 0:
             self.target_hidden = spec_info.target_hidden
-        elif spec_info.target_hidden is not None and spec_info.target_hidden.numel() > 0:
-            self.target_hidden = torch.cat([self.target_hidden, spec_info.target_hidden], dim=0)
+        elif (
+            spec_info.target_hidden is not None and spec_info.target_hidden.numel() > 0
+        ):
+            self.target_hidden = torch.cat(
+                [self.target_hidden, spec_info.target_hidden], dim=0
+            )
 
 
 @dataclass
@@ -133,7 +140,9 @@ class DFlashVerifyInput(SpecInput):
         batch.input_ids = self.draft_token
 
         if page_size == 1:
-            batch.out_cache_loc = alloc_token_slots(batch.tree_cache, len(batch.input_ids))
+            batch.out_cache_loc = alloc_token_slots(
+                batch.tree_cache, len(batch.input_ids)
+            )
             end_offset = batch.seq_lens + self.draft_token_num
         else:
             prefix_lens = batch.seq_lens
@@ -176,9 +185,7 @@ class DFlashVerifyInput(SpecInput):
             )
         mask_chunks: List[torch.Tensor] = []
         q_len = int(self.draft_token_num)
-        q_idx = torch.arange(
-            q_len, device=batch.device, dtype=torch.int32
-        ).unsqueeze(1)
+        q_idx = torch.arange(q_len, device=batch.device, dtype=torch.int32).unsqueeze(1)
         for prefix_len in batch.seq_lens_cpu.tolist():
             prefix_len_i = int(prefix_len)
             kv_len = prefix_len_i + q_len
@@ -339,7 +346,9 @@ class DFlashVerifyInput(SpecInput):
             batch.out_cache_loc = out_cache_loc[keep_mask]
         else:
             # Page-size > 1 is not supported in the initial DFlash implementation.
-            raise NotImplementedError("DFLASH verify with page_size > 1 is not supported yet.")
+            raise NotImplementedError(
+                "DFLASH verify with page_size > 1 is not supported yet."
+            )
 
         # Update req-level KV cache accounting.
         for req, commit_len in zip(batch.reqs, commit_lens_cpu, strict=True):
@@ -359,14 +368,18 @@ class DFlashVerifyInput(SpecInput):
 
         # Update batch seq lens.
         batch.seq_lens.add_(commit_lens.to(batch.seq_lens.dtype))
-        batch.seq_lens_cpu.add_(torch.tensor(commit_lens_cpu, dtype=batch.seq_lens_cpu.dtype))
+        batch.seq_lens_cpu.add_(
+            torch.tensor(commit_lens_cpu, dtype=batch.seq_lens_cpu.dtype)
+        )
         # Keep seq_lens_sum in sync; flashinfer indices updaters rely on this for buffer sizing.
         batch.seq_lens_sum += sum(commit_lens_cpu)
 
         # Build next-step context features from the committed verify-input tokens.
         hidden = logits_output.hidden_states
         if hidden is None:
-            raise RuntimeError("DFLASH verify requires target hidden states, but got None.")
+            raise RuntimeError(
+                "DFLASH verify requires target hidden states, but got None."
+            )
         hidden = hidden.view(bs, self.draft_token_num, -1)
         segments: List[torch.Tensor] = []
         for i, ln in enumerate(commit_lens_cpu):
@@ -377,5 +390,12 @@ class DFlashVerifyInput(SpecInput):
         # Avoid confusing downstream consumers (spec-v1 decode doesn't use this).
         logits_output.hidden_states = None
 
-        new_verified_id = torch.tensor(new_verified_cpu, dtype=torch.int64, device=device)
-        return new_verified_id, commit_lens, next_target_hidden, accept_length_per_req_cpu
+        new_verified_id = torch.tensor(
+            new_verified_cpu, dtype=torch.int64, device=device
+        )
+        return (
+            new_verified_id,
+            commit_lens,
+            next_target_hidden,
+            accept_length_per_req_cpu,
+        )

@@ -25,13 +25,13 @@ import triton.language as tl
 
 @triton.jit
 def _fused_norm_rope_write_kernel(
-    kv_ptr,              # [total_ctx, kv_size * 2]
-    k_norm_weight_ptr,   # [head_dim]
-    cos_sin_cache_ptr,   # [max_pos, rotary_dim]
-    positions_ptr,       # [total_ctx]
-    cache_loc_ptr,       # [total_ctx]
-    k_cache_ptr,         # [total_slots, num_kv_heads, head_dim]
-    v_cache_ptr,         # [total_slots, num_kv_heads, head_dim]
+    kv_ptr,  # [total_ctx, kv_size * 2]
+    k_norm_weight_ptr,  # [head_dim]
+    cos_sin_cache_ptr,  # [max_pos, rotary_dim]
+    positions_ptr,  # [total_ctx]
+    cache_loc_ptr,  # [total_ctx]
+    k_cache_ptr,  # [total_slots, num_kv_heads, head_dim]
+    v_cache_ptr,  # [total_slots, num_kv_heads, head_dim]
     kv_stride_ctx,
     cos_sin_stride_pos,
     k_cache_stride_slot,
@@ -61,8 +61,12 @@ def _fused_norm_rope_write_kernel(
     kv_base = kv_ptr + ctx_id * kv_stride_ctx
     k_base = kv_base + head_id * head_dim
     v_base = kv_base + kv_size + head_id * head_dim
-    k_write = k_cache_ptr + cache_loc * k_cache_stride_slot + head_id * k_cache_stride_head
-    v_write = v_cache_ptr + cache_loc * v_cache_stride_slot + head_id * v_cache_stride_head
+    k_write = (
+        k_cache_ptr + cache_loc * k_cache_stride_slot + head_id * k_cache_stride_head
+    )
+    v_write = (
+        v_cache_ptr + cache_loc * v_cache_stride_slot + head_id * v_cache_stride_head
+    )
 
     # Load K and V
     offs = tl.arange(0, BLOCK_HD)
@@ -80,12 +84,18 @@ def _fused_norm_rope_write_kernel(
     # RoPE (neox style): k_first, k_second -> rotated
     cos_sin_base = cos_sin_cache_ptr + position * cos_sin_stride_pos
     cos_v = tl.load(cos_sin_base + offs, mask=mask_half, other=1.0).to(tl.float32)
-    sin_v = tl.load(cos_sin_base + half_rotary_dim + offs, mask=mask_half, other=0.0).to(tl.float32)
+    sin_v = tl.load(
+        cos_sin_base + half_rotary_dim + offs, mask=mask_half, other=0.0
+    ).to(tl.float32)
 
     # Extract first/second halves of K for rotation
     k_first = tl.where(mask_half, k_normed, 0.0)
-    k_second_raw = tl.load(k_base + half_rotary_dim + offs, mask=mask_half, other=0.0).to(tl.float32)
-    norm_w_second = tl.load(k_norm_weight_ptr + half_rotary_dim + offs, mask=mask_half, other=1.0).to(tl.float32)
+    k_second_raw = tl.load(
+        k_base + half_rotary_dim + offs, mask=mask_half, other=0.0
+    ).to(tl.float32)
+    norm_w_second = tl.load(
+        k_norm_weight_ptr + half_rotary_dim + offs, mask=mask_half, other=1.0
+    ).to(tl.float32)
     k_second = k_second_raw * inv_rms * norm_w_second
 
     # Apply rotation
@@ -97,7 +107,9 @@ def _fused_norm_rope_write_kernel(
 
     # Store K: rotated halves + pass-through
     tl.store(k_write + offs, k_rot_first.to(v_raw.dtype), mask=mask_half)
-    tl.store(k_write + half_rotary_dim + offs, k_rot_second.to(v_raw.dtype), mask=mask_half)
+    tl.store(
+        k_write + half_rotary_dim + offs, k_rot_second.to(v_raw.dtype), mask=mask_half
+    )
     mask_pass = (offs >= rotary_dim) & (offs < head_dim)
     tl.store(k_write + offs, k_normed.to(v_raw.dtype), mask=mask_pass)
 
@@ -168,7 +180,14 @@ def fused_kv_materialize(
 class FusedKVMaterializeHelper:
     """Pre-stacks weights at init for efficient fused KV materialization."""
 
-    def __init__(self, layers: List, rotary_emb, num_kv_heads: int, head_dim: int, device: torch.device):
+    def __init__(
+        self,
+        layers: List,
+        rotary_emb,
+        num_kv_heads: int,
+        head_dim: int,
+        device: torch.device,
+    ):
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.rotary_emb = rotary_emb
@@ -197,8 +216,17 @@ class FusedKVMaterializeHelper:
         v_cache_buffers: List[torch.Tensor],
     ) -> None:
         fused_kv_materialize(
-            ctx_hidden, self.batched_kv_weight, self.batched_k_norm_weight,
-            self.rotary_emb.cos_sin_cache, positions, cache_locs,
-            k_cache_buffers, v_cache_buffers,
-            self.num_kv_heads, self.head_dim, self.rotary_dim, self.eps, self.is_neox_style,
+            ctx_hidden,
+            self.batched_kv_weight,
+            self.batched_k_norm_weight,
+            self.rotary_emb.cos_sin_cache,
+            positions,
+            cache_locs,
+            k_cache_buffers,
+            v_cache_buffers,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rotary_dim,
+            self.eps,
+            self.is_neox_style,
         )

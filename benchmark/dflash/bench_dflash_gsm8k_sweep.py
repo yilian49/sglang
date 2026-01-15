@@ -22,8 +22,8 @@ import argparse
 import ast
 import os
 import re
-import time
 import statistics
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Optional
@@ -306,12 +306,17 @@ def main() -> None:
         raise RuntimeError("No concurrencies specified.")
 
     num_questions_by_conc = {
-        c: min(int(args.questions_per_concurrency_base) * int(c), int(args.max_questions_per_config))
+        c: min(
+            int(args.questions_per_concurrency_base) * int(c),
+            int(args.max_questions_per_config),
+        )
         for c in concurrencies
     }
     max_questions = max(num_questions_by_conc.values())
 
-    attention_backends = [s.strip() for s in args.attention_backends.split(",") if s.strip()]
+    attention_backends = [
+        s.strip() for s in args.attention_backends.split(",") if s.strip()
+    ]
     is_blackwell = _is_blackwell()
     device_sm = get_device_sm()
     if is_blackwell:
@@ -361,7 +366,9 @@ def main() -> None:
         raise RuntimeError("Invalid labels in GSM8K data.")
 
     default_stop = (
-        ["Question", "Assistant:", "<|separator|>"] if args.prompt_style == "fewshot_qa" else []
+        ["Question", "Assistant:", "<|separator|>"]
+        if args.prompt_style == "fewshot_qa"
+        else []
     )
 
     # Results indexed by (backend, tp, concurrency) for baseline + dflash.
@@ -391,7 +398,12 @@ def main() -> None:
                 str(args.max_running_requests),
             ]
             common_server_args.extend(
-                ["--cuda-graph-bs", *[str(i) for i in range(1, 33)], "--cuda-graph-max-bs", "32"]
+                [
+                    "--cuda-graph-bs",
+                    *[str(i) for i in range(1, 33)],
+                    "--cuda-graph-max-bs",
+                    "32",
+                ]
             )
             if args.disable_radix_cache:
                 common_server_args.append("--disable-radix-cache")
@@ -400,7 +412,7 @@ def main() -> None:
 
             if args.compare_fused_kv:
                 # ======== MODE: Compare all three (baseline, DFLASH fused, DFLASH unfused) ========
-                
+
                 # 1. Run baseline (no speculative decoding)
                 print(f"\n=== backend={backend} tp={tp} (baseline) ===")
                 baseline_port = find_available_port(port_base)
@@ -412,7 +424,9 @@ def main() -> None:
                     other_args=common_server_args,
                 )
                 try:
-                    _send_generate(baseline_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    _send_generate(
+                        baseline_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300
+                    )
                     for conc in concurrencies:
                         n = num_questions_by_conc[conc]
                         _flush_cache(baseline_url)
@@ -457,10 +471,15 @@ def main() -> None:
                     args.target_model,
                     unfused_url,
                     timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-                    other_args=[*dflash_common, "--disable-speculative-dflash-fused-kv"],
+                    other_args=[
+                        *dflash_common,
+                        "--disable-speculative-dflash-fused-kv",
+                    ],
                 )
                 try:
-                    _send_generate(unfused_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    _send_generate(
+                        unfused_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300
+                    )
                     for conc in concurrencies:
                         n = num_questions_by_conc[conc]
                         _flush_cache(unfused_url)
@@ -474,8 +493,12 @@ def main() -> None:
                             timeout_s=int(args.timeout_s),
                             expect_dflash=True,
                         )
-                        dflash_unfused_toks[(backend, tp, conc)] = metrics.output_toks_per_s
-                        dflash_unfused_accept_len[(backend, tp, conc)] = metrics.spec_accept_length
+                        dflash_unfused_toks[(backend, tp, conc)] = (
+                            metrics.output_toks_per_s
+                        )
+                        dflash_unfused_accept_len[(backend, tp, conc)] = (
+                            metrics.spec_accept_length
+                        )
                         dflash_unfused_acc[(backend, tp, conc)] = metrics.accuracy
                         print(
                             f"[unfused]  conc={conc:>2} n={n:<4} "
@@ -502,7 +525,9 @@ def main() -> None:
                     other_args=dflash_common,  # fused KV auto-enabled
                 )
                 try:
-                    _send_generate(fused_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    _send_generate(
+                        fused_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300
+                    )
                     for conc in concurrencies:
                         n = num_questions_by_conc[conc]
                         _flush_cache(fused_url)
@@ -517,7 +542,9 @@ def main() -> None:
                             expect_dflash=True,
                         )
                         dflash_toks[(backend, tp, conc)] = metrics.output_toks_per_s
-                        dflash_accept_len[(backend, tp, conc)] = metrics.spec_accept_length
+                        dflash_accept_len[(backend, tp, conc)] = (
+                            metrics.spec_accept_length
+                        )
                         dflash_acc[(backend, tp, conc)] = metrics.accuracy
                         print(
                             f"[fused]    conc={conc:>2} n={n:<4} "
@@ -544,7 +571,9 @@ def main() -> None:
                     other_args=common_server_args,
                 )
                 try:
-                    _send_generate(baseline_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    _send_generate(
+                        baseline_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300
+                    )
                     for conc in concurrencies:
                         n = num_questions_by_conc[conc]
                         _flush_cache(baseline_url)
@@ -589,7 +618,9 @@ def main() -> None:
                     ],
                 )
                 try:
-                    _send_generate(dflash_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300)
+                    _send_generate(
+                        dflash_url, "Hello", max_new_tokens=8, stop=[], timeout_s=300
+                    )
                     for conc in concurrencies:
                         n = num_questions_by_conc[conc]
                         _flush_cache(dflash_url)
@@ -604,7 +635,9 @@ def main() -> None:
                             expect_dflash=True,
                         )
                         dflash_toks[(backend, tp, conc)] = metrics.output_toks_per_s
-                        dflash_accept_len[(backend, tp, conc)] = metrics.spec_accept_length
+                        dflash_accept_len[(backend, tp, conc)] = (
+                            metrics.spec_accept_length
+                        )
                         dflash_acc[(backend, tp, conc)] = metrics.accuracy
                         print(
                             f"[DFLASH]   conc={conc:>2} n={n:<4} "
@@ -639,7 +672,9 @@ def main() -> None:
     md_lines.append(f"- attention_backends: `{', '.join(attention_backends)}`")
     md_lines.append(f"- tp_sizes: `{', '.join(str(x) for x in tp_sizes)}`")
     md_lines.append(f"- concurrencies: `{', '.join(str(x) for x in concurrencies)}`")
-    md_lines.append(f"- questions_per_concurrency: `base={args.questions_per_concurrency_base}`")
+    md_lines.append(
+        f"- questions_per_concurrency: `base={args.questions_per_concurrency_base}`"
+    )
     md_lines.append(f"- device_sm: `{device_sm}`")
     md_lines.append(f"- is_blackwell: `{is_blackwell}`")
     if args.compare_fused_kv:
@@ -688,9 +723,15 @@ def main() -> None:
                     b = baseline_values.get((tp, conc), None)
                     u = unfused_values.get((tp, conc), None)
                     f = fused_values.get((tp, conc), None)
-                    speedup_unfused_vs_baseline[(tp, conc)] = None if (b is None or u is None or b <= 0) else (u / b)
-                    speedup_fused_vs_baseline[(tp, conc)] = None if (b is None or f is None or b <= 0) else (f / b)
-                    speedup_fused_vs_unfused[(tp, conc)] = None if (u is None or f is None or u <= 0) else (f / u)
+                    speedup_unfused_vs_baseline[(tp, conc)] = (
+                        None if (b is None or u is None or b <= 0) else (u / b)
+                    )
+                    speedup_fused_vs_baseline[(tp, conc)] = (
+                        None if (b is None or f is None or b <= 0) else (f / b)
+                    )
+                    speedup_fused_vs_unfused[(tp, conc)] = (
+                        None if (u is None or f is None or u <= 0) else (f / u)
+                    )
 
             # Throughput tables
             md_lines.append("### Baseline (tok/s)")
@@ -833,7 +874,9 @@ def main() -> None:
                 for conc in concurrencies:
                     b = baseline_values.get((tp, conc), None)
                     d = dflash_values.get((tp, conc), None)
-                    speedup_values[(tp, conc)] = None if (b is None or d is None or b <= 0) else (d / b)
+                    speedup_values[(tp, conc)] = (
+                        None if (b is None or d is None or b <= 0) else (d / b)
+                    )
 
             md_lines.append("### Baseline output tok/s")
             md_lines.append(
@@ -894,7 +937,9 @@ def main() -> None:
             )
             md_lines.append("")
 
-            md_lines.append("### DFLASH acceptance length (mean per-request spec_accept_length)")
+            md_lines.append(
+                "### DFLASH acceptance length (mean per-request spec_accept_length)"
+            )
             md_lines.append(
                 _format_table(
                     tp_sizes=tp_sizes,
