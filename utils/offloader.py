@@ -1,7 +1,7 @@
 import logging
 import os
 from abc import ABC
-from typing import Callable, Generator, List, Optional
+from typing import Callable, Dict, Generator, List, Optional
 
 import torch
 from torch.func import functional_call
